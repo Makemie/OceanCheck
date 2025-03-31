@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Makemie APP - Turbidity Monitoring in Tanzania</title>
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    #map { height: 500px; }
+    body { padding: 20px; }
+    .container { max-width: 1200px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="text-center mb-4">Makemie APP - Turbidity Monitoring in Tanzania</h1>
+    <p class="text-center mb-4">Monitor coastal water turbidity in Zanzibar using Sentinel-2 imagery. Select a date range, visualize the results, and download GeoTIFFs.</p>
+
+    <!-- Date Filter Form -->
+    <div class="row mb-4">
+      <div class="col-md-6">
+        <label for="startDate" class="form-label">Start Date</label>
+        <input type="date" id="startDate" class="form-control" value="2023-06-01">
+      </div>
+      <div class="col-md-6">
+        <label for="endDate" class="form-label">End Date</label>
+        <input type="date" id="endDate" class="form-control" value="2023-06-30">
+      </div>
+    </div>
+    <div class="row mb-4">
+      <div class="col-md-6">
+        <label for="layerSelect" class="form-label">Select Layer to Display</label>
+        <select id="layerSelect" class="form-select">
+          <option value="Turbidity_Ratio">Turbidity Ratio (B4/(B3+B2))</option>
+          <option value="Turbidity_Ratio_Smooth">Turbidity Ratio (Smoothed)</option>
+          <option value="Turbidity_Log">Turbidity Log (ln(B4/B2))</option>
+        </select>
+      </div>
+      <div class="col-md-6 d-flex align-items-end">
+        <button class="btn btn-primary me-2" onclick="updateMap()">Update Map</button>
+
+        <button class="btn btn-success" onclick="downloadGeoTIFF()">Download GeoTIFF</button>
+      </div>
+    </div>
+
+    <!-- Map Container -->
+    <div id="map" class="mb-4"></div>
+  </div>
+
+  <!-- Earth Engine API -->
+  <script src="https://cdn.jsdelivr.net/npm/ee-js-api@0.1.343/ee_api_js.js"></script>
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Bootstrap JS -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+  <script>
+    // Initialize Earth Engine (replace with your client ID or use a service account)
+    ee.initialize(null, null, function() {
+      console.log('Earth Engine initialized');
+      updateMap(); // Load default map on startup
+    }, function(e) {
+      console.error('Initialization error:', e);
+    });
+
+    // Initialize Leaflet map
+    var map = L.map('map').setView([-6.3, 39.3], 10);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+    }).addTo(map);
+
+    var currentLayer = null;
+
+    // Function to update the map based on date range and selected layer
+    function updateMap() {
+      var startDate = document.getElementById('startDate').value;
+      var endDate = document.getElementById('endDate').value;
+      var layerType = document.getElementById('layerSelect').value;
+
+      // Define visualization parameters based on layer type
+      var visParams = layerType === 'Turbidity_Log' ? 
+        {min: -1, max: 1, palette: ['blue', 'yellow', 'red']} : 
+        {min: 0, max: 0.5, palette: ['blue', 'yellow', 'red']};
+
+      // Call GEE to process turbidity
+      var image = processTurbidity(startDate, endDate);
+      var mapId = image.select(layerType).getMap(visParams);
+
+      // Remove previous layer if exists
+      if (currentLayer) {
+        map.removeLayer(currentLayer);
+      }
+
+      // Add new layer to the map
+      currentLayer = L.tileLayer(mapId.urlFormat, {
+        attribution: 'Google Earth Engine',
+        maxZoom: 18
+      }).addTo(map);
+    }
+
+    // Function to process turbidity (client-side wrapper for GEE function)
+    function processTurbidity(startDate, endDate) {
+      var filteredS2 = ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
+        .filterBounds(ee.Geometry.Rectangle([39.1, -6.5, 39.5, -6.1]))
+        .filterDate(startDate, endDate)
+        .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 5))
+        .select(['B2', 'B3', 'B4', 'B8']);
+
+      var s2Corrected = filteredS2.map(function(image) {
+        var b2 = image.select('B2').divide(10000);
+        var b3 = image.select('B3').divide(10000);
+        var b4 = image.select('B4').divide(10000);
+        var b8 = image.select('B8').divide(10000);
+
+        var correctedB2 = b2.subtract(ee.Number(pathRadianceB2)).max(0);
+        var correctedB3 = b3.subtract(ee.Number(pathRadianceB3)).max(0);
+        var correctedB4 = b4.subtract(ee.Number(pathRadianceB4)).max(0);
+
+        return image.addBands(correctedB2.rename('B2_corrected'))
+                   .addBands(correctedB3.rename('B3_corrected'))
+                   .addBands(correctedB4.rename('B4_corrected'))
+                   .select(['B2_corrected', 'B3_corrected', 'B4_corrected', 'B8'], ['B2', 'B3', 'B4', 'B8']);
+      });
+
+      var s2WithCloudScore = s2Corrected.linkCollection(
+        ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED'), [QA_BAND]
+      );
+      var s2CloudMasked = s2WithCloudScore.map(function(image) {
+        return image.updateMask(image.select(QA_BAND).gte(CLEAR_THRESHOLD));
+      });
+      var s2Water = s2CloudMasked.map(function(image) {
+        var ndwi = image.normalizedDifference(['B3', 'B4']).rename('NDWI');
+        var waterMask = ndwi.gt(0.3);
+        return image.updateMask(waterMask);
+      });
+      var s2Normalized = s2Water.map(function(image) {
+        var b2 = image.select('B2');
+        var b3 = image.select('B3');
+        var b4 = image.select('B4');
+
+        var meanB2Image = ee.Image.constant(meanB2);
+        var meanB3Image = ee.Image.constant(meanB3);
+        var meanB4Image = ee.Image.constant(meanB4);
+
+        var normB2 = b2.divide(meanB2Image).multiply(0.1);
+        var normB3 = b3.divide(meanB3Image).multiply(0.1);
+        var normB4 = b4.divide(meanB4Image).multiply(0.1);
+
+        return image.addBands(normB2.rename('B2_norm'))
+                   .addBands(normB3.rename('B3_norm'))
+                   .addBands(normB4.rename('B4_norm'))
+                   .select(['B2_norm', 'B3_norm', 'B4_norm'], ['B2', 'B3', 'B4']);
+      });
+      var s2Turbidity = s2Normalized.map(function(image) {
+        var b2 = image.select('B2');
+        var b3 = image.select('B3');
+        var b4 = image.select('B4');
+
+        var denominatorRatio = b3.add(b2).max(0.0001);
+        var denominatorLog = b2.max(0.0001);
+
+        var turbRatio = b4.divide(denominatorRatio).rename('Turbidity_Ratio');
+        var turbLog = b4.divide(denominatorLog).log().rename('Turbidity_Log');
+
+        return image.addBands(turbRatio).addBands(turbLog);
+      });
+
+      var s2Median = s2Turbidity.median().clip(ee.Geometry.Rectangle([39.1, -6.5, 39.5, -6.1]));
+      var turbSmooth = s2Median.select('Turbidity_Ratio')
+        .focalMean({radius: 30, kernelType: 'square', units: 'meters'})
+        .rename('Turbidity_Ratio_Smooth');
+
+      return s2Median.addBands(turbSmooth);
+    }
+
+    // Function to download GeoTIFF
+    function downloadGeoTIFF() {
+      var startDate = document.getElementById('startDate').value;
+      var endDate = document.getElementById('endDate').value;
+      var description = 'Turbidity_' + startDate + '_to_' + endDate;
+
+      var image = processTurbidity(startDate, endDate);
+      var exportImage = image.select(['Turbidity_Ratio', 'Turbidity_Log', 'Turbidity_Ratio_Smooth']);
+
+      // Export to Google Drive
+      ee.batch.Export.image.toDrive({
+        image: exportImage,
+        description: description,
+        folder: 'Makemie_APP_Exports',
+        region: ee.Geometry.Rectangle([39.1, -6.5, 39.5, -6.1]),
+        scale: 10,
+        maxPixels: 1e13,
+        fileFormat: 'GeoTIFF'
+      }).start();
+
+      alert('Export started! Check your Google Drive (Makemie_APP_Exports folder) for the GeoTIFF.');
+    }
+
+    // Precompute path radiance and means (client-side access to server-side variables)
+    var pathRadianceB2 = ee.Number(pathRadianceB2);
+    var pathRadianceB3 = ee.Number(pathRadianceB3);
+    var pathRadianceB4 = ee.Number(pathRadianceB4);
+    var meanB2 = ee.Number(meanB2);
+    var meanB3 = ee.Number(meanB3);
+    var meanB4 = ee.Number(meanB4);
+  </script>
+</body>
+</html>
