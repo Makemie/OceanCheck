@@ -189,14 +189,14 @@
       ee.batch.Export.image.toDrive({
         image: exportImage,
         description: description,
-        folder: 'Makemie_APP_Exports',
+        folder: 'OceanCheck_APP_Exports',
         region: ee.Geometry.Rectangle([39.1, -6.5, 39.5, -6.1]),
         scale: 10,
         maxPixels: 1e13,
         fileFormat: 'GeoTIFF'
       }).start();
 
-      alert('Export started! Check your Google Drive (Makemie_APP_Exports folder) for the GeoTIFF.');
+      alert('Export started! Check your Google Drive (OceanCheck_APP_Exports folder) for the GeoTIFF.');
     }
 
     // Precompute path radiance and means (client-side access to server-side variables)
